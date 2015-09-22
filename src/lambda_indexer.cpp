@@ -120,16 +120,16 @@ argConv0(LambdaIndexerOptions const & options)
 {
     switch(options.blastProgram)
     {
-        case BlastProgram::BLASTN:
-            return argConv1(options, BlastProgramSelector<BlastProgram::BLASTN>());
-        case BlastProgram::BLASTP:
-            return argConv1(options, BlastProgramSelector<BlastProgram::BLASTP>());
+        //case BlastProgram::BLASTN:
+        //    return argConv1(options, BlastProgramSelector<BlastProgram::BLASTN>());
+        //case BlastProgram::BLASTP:
+        //    return argConv1(options, BlastProgramSelector<BlastProgram::BLASTP>());
         case BlastProgram::BLASTX:
             return argConv1(options, BlastProgramSelector<BlastProgram::BLASTX>());
-        case BlastProgram::TBLASTN:
-            return argConv1(options, BlastProgramSelector<BlastProgram::TBLASTN>());
-        case BlastProgram::TBLASTX:
-            return argConv1(options, BlastProgramSelector<BlastProgram::TBLASTX>());
+        //case BlastProgram::TBLASTN:
+        //    return argConv1(options, BlastProgramSelector<BlastProgram::TBLASTN>());
+        //case BlastProgram::TBLASTX:
+        //    return argConv1(options, BlastProgramSelector<BlastProgram::TBLASTX>());
         default:
             break;
     }
@@ -146,8 +146,8 @@ argConv1(LambdaIndexerOptions           const & options,
     using Tp = BlastProgramSelector<p>;
     switch (options.alphReduction)
     {
-        case 0:
-            return argConv2(options, Tp(), TUnred());
+        //case 0:
+        //    return argConv2(options, Tp(), TUnred());
         case 2:
             return argConv2(options, Tp(), ReducedAminoAcid<Murphy10>());
 #if 0
@@ -180,6 +180,8 @@ argConv2(LambdaIndexerOptions     const & options,
         return realMain(options, BlastProgramSelector<p>(), TRedAlph(), SaAdvancedSort<QuickSortTag>());
     else if (options.algo == "quicksortbuckets")
         return realMain(options, BlastProgramSelector<p>(), TRedAlph(), SaAdvancedSort<QuickSortBucketTag>());
+    else if (options.algo == "inplaceradixsort")
+        return realMain(options, BlastProgramSelector<p>(), TRedAlph(), SaAdvancedSort<InPlaceRadixTag>());
     else
         return realMain(options, BlastProgramSelector<p>(), TRedAlph(), Nothing());
 }
