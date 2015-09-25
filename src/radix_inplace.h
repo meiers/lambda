@@ -32,6 +32,9 @@
 // Author: Sascha Meiers <meiers@inf.fu-berlin.de>
 // ==========================================================================
 
+#include <mutex>
+#include <thread>
+
 #ifndef CORE_INCLUDE_SEQAN_INDEX_RADIX_INPLACE_H_
 #define CORE_INCLUDE_SEQAN_INDEX_RADIX_INPLACE_H_
 
@@ -200,8 +203,6 @@ struct RadixTextAccessor<TSAValue,
 // ----------------------------------------------------------------------------
 // RecursionStack.
 // ----------------------------------------------------------------------------
-// Self written in the hope of being efficient. Note the hardcoded stack
-// size. Maybe switch to some std::deque?
 
 template <typename TSAValue, typename TSmallSize>
 struct _RadixRecursionStackEntry
@@ -224,7 +225,7 @@ struct RadixRecursionStack
 
     RadixRecursionStack()
     {
-        reserve(stack, 20000);
+        reserve(stack, 20); // todo (change back to reasonable number e.g. 20,000
     }
 
     inline bool empty() { return length(stack) <=0; }
@@ -310,22 +311,13 @@ struct InplaceRadixSorter
         TSAValue* bucketEnd[Q];  // "static" makes little difference to speed
 
 
-        // get bucket sizes (i.e. letter counts):
-        // The intermediate oracle array makes it faster (see "Engineering
-        // Radix Sort for Strings" by J Karkkainen & T Rantala)
-        for( TSAValue* i = beg; i < end; /* noop */ )
-        {
-            // buffer for the next chars
-            TOrdValue oracle [ORACLESIZE];
-            TOrdValue* oracleEnd = oracle + std::min(static_cast<std::size_t>(ORACLESIZE),
-                                                     static_cast<std::size_t>(end - i) );
 
-            for( TOrdValue* j = oracle; j < oracleEnd; ++j )
-                *j = textAccess(*i++, depth);
 
-            for( TOrdValue* j = oracle; j < oracleEnd; ++j )
-                ++bucketSize[ *j ];
-        }
+        // EXPERIMENTAL ////////////////////////////////////////////////////////
+        RadixRecursionStack<TSAValue, TSize> tempStack;
+        // END EX //////////////////////////////////////////////////////////////
+
+
 
         // get bucket ends, and put buckets on the stack to sort within them later:
         // EDIT: 0 bucket is not sorted here, but later.
@@ -337,7 +329,12 @@ struct InplaceRadixSorter
         {
             TSAValue* nextPos = pos + bucketSize[i];
             if (nextPos - pos > 1)
-            stack.push(pos, nextPos, depth+1);
+
+            //#pragma omp critical(stacklock)
+            {
+                //stack.push(pos, nextPos, depth+1);
+                tempStack.push(pos, nextPos, depth+1);
+            }
             pos = nextPos;
             bucketEnd[i] = pos;
         }
@@ -356,6 +353,16 @@ struct InplaceRadixSorter
         // sort the 0 bucket using std::sort
         if(zeroBucketSize > 1)
             std::sort(beg, beg+zeroBucketSize, comp);
+
+        #pragma omp critical(stacklock)
+        {
+            while (!tempStack.stack.empty())
+            {
+                stack.stack.push_back( tempStack.stack.back() );
+                tempStack.stack.pop_back();
+            }
+        }
+
     }
 };
 
@@ -503,7 +510,8 @@ void inplaceRadixSort(
         if(currDepth >= maxDepth)
         continue;
 
-        radixSort(from, to, currDepth, stack);
+        // Temporarily disabled. Working on mutex
+        //radixSort(from, to, currDepth, stack);
     }
 }
 
@@ -554,7 +562,8 @@ void inplaceRadixSort(
         if(currDepth >= maxDepth)
             continue;
 
-        radixSort(from, to, currDepth, stack);
+        // Temporarily disabled. Working on mutex
+        //radixSort(from, to, currDepth, stack);
     }
 }
 
@@ -562,6 +571,7 @@ void inplaceRadixSort(
 // ----------------------------------------------------------------------------
 // Function inplaceFullRadixSort()                                    [default]
 // ----------------------------------------------------------------------------
+
 
 template <typename TSA, typename TString>
 void inplaceFullRadixSort( TSA & sa, TString const & str)
@@ -587,6 +597,53 @@ void inplaceFullRadixSort( TSA & sa, TString const & str)
     RadixRecursionStack<TSAValue, TSize> stack;
     stack.push(&sa[0], &sa[0]+length(sa), 0);
 
+
+    // experimental ////////////////////////////////////////////////////////////
+
+
+    // sort by the first character
+    {
+        TSAValue *from;
+        TSAValue *to;
+        TSize currDepth;
+        stack.pop(from, to, currDepth);
+        radixSort(from, to, currDepth, stack);
+    }
+    std::cout << "Finished sorting by the first charracter" << std::endl;
+
+
+    #pragma omp parallel
+    {
+        // flag per thread
+        bool done = false;
+        TSorter 	radixSort_thread(textAccess, TZeroComp(stringSetLimits(str))); // input is const &
+
+        while (!done)
+        {
+            TSAValue *from;
+            TSAValue *to;
+            TSize currDepth;
+
+            #pragma omp critical(stacklock)
+            {
+                if (stack.empty())
+                    done = true;
+                else
+                    stack.pop(from, to, currDepth);
+
+                std::cout << "Thread " << omp_get_thread_num() << " is done? " << done << std::endl;
+            }
+            if (!done)
+                radixSort_thread(from, to, currDepth, stack);
+        }
+    }
+
+
+    // end experimental ////////////////////////////////////////////////////////
+
+
+    /*
+
     while(!stack.empty())
     {
         TSAValue *from;
@@ -598,14 +655,16 @@ void inplaceFullRadixSort( TSA & sa, TString const & str)
         continue;
 
         // other sort algorithm for small buckets:
-/*        if(to - from < 20)
-        {
-            ::std::sort( from, to, SuffixLess_<TSAValue, TString const, void>(str, currDepth));
-            continue;
-        }
-*/
+//        if(to - from < 20)
+//        {
+//            ::std::sort( from, to, SuffixLess_<TSAValue, TString const, void>(str, currDepth));
+//            continue;
+//        }
+
         radixSort(from, to, currDepth, stack);
     }
+
+    */
 }
 
 
@@ -658,7 +717,8 @@ void inplaceFullRadixSort(TSA & sa,
             continue;
         }
 */
-        radixSort(from, to, currDepth, stack);
+        // Temporarily disabled. Working on mutex
+        //radixSort(from, to, currDepth, stack);
     }
 }
     
