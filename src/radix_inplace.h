@@ -307,11 +307,26 @@ struct InplaceRadixSorter
                            RadixRecursionStack<TSAValue, TSize> & stack)
     {
         // Note(meiers): Watch out here when you want to parallelize
-        static TSize bucketSize[Q];  // initialized to zero at startup
+        static thread_local TSize bucketSize[Q];  // initialized to zero at startup
         TSAValue* bucketEnd[Q];  // "static" makes little difference to speed
 
 
+        // get bucket sizes (i.e. letter counts):
+        // The intermediate oracle array makes it faster (see "Engineering
+        // Radix Sort for Strings" by J Karkkainen & T Rantala)
+        for( TSAValue* i = beg; i < end; /* noop */ )
+        {
+            // buffer for the next chars
+            TOrdValue oracle [ORACLESIZE];
+            TOrdValue* oracleEnd = oracle + std::min(static_cast<std::size_t>(ORACLESIZE),
+                                                     static_cast<std::size_t>(end - i) );
 
+            for( TOrdValue* j = oracle; j < oracleEnd; ++j )
+                *j = textAccess(*i++, depth);
+
+            for( TOrdValue* j = oracle; j < oracleEnd; ++j )
+                ++bucketSize[ *j ];
+        }
 
         // EXPERIMENTAL ////////////////////////////////////////////////////////
         RadixRecursionStack<TSAValue, TSize> tempStack;
@@ -330,9 +345,9 @@ struct InplaceRadixSorter
             TSAValue* nextPos = pos + bucketSize[i];
             if (nextPos - pos > 1)
 
-            //#pragma omp critical(stacklock)
+            // todo: find a better solution than the tempStack (because it reserves space)
             {
-                //stack.push(pos, nextPos, depth+1);
+//                 stack.push(pos, nextPos, depth+1);
                 tempStack.push(pos, nextPos, depth+1);
             }
             pos = nextPos;
@@ -354,7 +369,7 @@ struct InplaceRadixSorter
         if(zeroBucketSize > 1)
             std::sort(beg, beg+zeroBucketSize, comp);
 
-        #pragma omp critical(stacklock)
+        //#pragma omp critical(stacklock)
         {
             while (!tempStack.stack.empty())
             {
@@ -362,6 +377,8 @@ struct InplaceRadixSorter
                 tempStack.stack.pop_back();
             }
         }
+
+        //std::cout << "Thread " << omp_get_thread_num() << ": Finished interval length " << (end-beg) << " in " << (sysTime() - t) << std::endl;
 
     }
 };
@@ -601,7 +618,8 @@ void inplaceFullRadixSort( TSA & sa, TString const & str)
     // experimental ////////////////////////////////////////////////////////////
 
 
-    // sort by the first character
+    // 1.
+    // sort by the first character. write next SIGMA intervals to the same stack
     {
         TSAValue *from;
         TSAValue *to;
@@ -609,9 +627,104 @@ void inplaceFullRadixSort( TSA & sa, TString const & str)
         stack.pop(from, to, currDepth);
         radixSort(from, to, currDepth, stack);
     }
-    std::cout << "Finished sorting by the first charracter" << std::endl;
+    std::cout << "Finished sorting by the first charracter\n" << std::endl;
 
 
+    // 2.
+    // sort first level of buckets in parallel (SIGMA many)
+    // write 2nd-level intervals to a separate stack (collect_stack)
+        RadixRecursionStack<TSAValue, TSize> collect_stack;
+    #pragma omp parallel
+    {
+        // flag per thread
+        bool done = false;
+        TSorter 	radixSort_thread(textAccess, TZeroComp(stringSetLimits(str))); // input is const &
+        RadixRecursionStack<TSAValue, TSize> private_stack;
+
+        while (!done)
+        {
+            TSAValue *from;
+            TSAValue *to;
+            TSize currDepth;
+
+            #pragma omp critical(stacklock)
+            {
+                if (stack.empty())
+                    done = true;
+                else
+                    stack.pop(from, to, currDepth);
+            }
+
+            if (!done)
+            {
+                // nothing to sort
+                if(to - from < 2)
+                    continue;
+
+                // other sort algorithm for small buckets:
+                if(to - from < 50)
+                {
+                    ::std::sort( from, to, SuffixLess_<TSAValue, TString const>(str, currDepth));
+                    continue;
+                }
+
+                radixSort_thread(from, to, currDepth, private_stack);
+            }
+
+        }
+
+        // save the intervals created in this thread
+        #pragma omp critical
+        {
+            while(!private_stack.stack.empty()) {
+                collect_stack.stack.push_back(private_stack.stack.back());
+                private_stack.stack.pop_back();
+            }
+        }
+
+        std::cout << "Thread " << omp_get_thread_num() << " is done" << std::endl;
+    } //#pragma omp parallel
+
+    std::cout << "Finished sorting by first 2 characters." << std::endl;
+
+    std::cout << "#parallel buckets: " << collect_stack.stack.size() << std::endl;
+
+
+    // 3.
+    // then sort each bucket (e.g. SIGMA * SIGMA many) using private stacks,
+    // parallelized in this for loop
+    #pragma omp parallel for
+    for (unsigned i=0; i<= collect_stack.stack.size(); ++i) {
+
+        // create private stack with only one interval
+        // this stack will not get blocked all the time by omp critical.
+        RadixRecursionStack<TSAValue, TSize> private_stack;
+        private_stack.stack.push_back(collect_stack.stack[i]);
+
+        while(!private_stack.empty())
+        {
+            TSAValue *from;
+            TSAValue *to;
+            TSize currDepth;
+            private_stack.pop(from, to, currDepth);
+
+            if(to - from < 2)
+                continue;
+
+            // other sort algorithm for small buckets:
+            if(to - from < 20)
+            {
+                ::std::sort( from, to, SuffixLess_<TSAValue, TString const>(str, currDepth));
+                continue;
+            }
+    
+            radixSort(from, to, currDepth, private_stack);
+        }
+    } //#pragma omp parallel for
+
+    std::cout << "Finished sorting" << std::endl;
+
+/*
     #pragma omp parallel
     {
         // flag per thread
@@ -630,15 +743,29 @@ void inplaceFullRadixSort( TSA & sa, TString const & str)
                     done = true;
                 else
                     stack.pop(from, to, currDepth);
-
-                std::cout << "Thread " << omp_get_thread_num() << " is done? " << done << std::endl;
             }
+
             if (!done)
+            {
+                // nothing to sort
+                if(to - from < 2)
+                    continue;
+
+                // other sort algorithm for small buckets:
+                if(to - from < 50)
+                {
+                    ::std::sort( from, to, SuffixLess_<TSAValue, TString const>(str, currDepth));
+                    continue;
+                }
+
                 radixSort_thread(from, to, currDepth, stack);
+            }
+
         }
+        std::cout << "Thread " << omp_get_thread_num() << " is done? " << done << std::endl;
     }
 
-
+*/
     // end experimental ////////////////////////////////////////////////////////
 
 
